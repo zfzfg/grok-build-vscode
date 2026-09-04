@@ -444,7 +444,7 @@ export type HostMsg =
    * `checking` is a re-observation in flight (Settings → Providers Refresh). It
    * is the ONLY source of that spinner: a client must never latch it locally,
    * or an older host that ignores `refreshProviders` would spin forever. */
-  | { type: "providerState"; providers: { id: "grok" | "codex" | "claude"; connected: boolean; needsLogin?: boolean; cliVersion?: string; adapterVersion?: string; latestCliVersion?: string; updateAvailable?: boolean }[]; checking?: boolean }
+  | { type: "providerState"; providers: { id: "grok" | "codex" | "claude" | "gemini"; connected: boolean; needsLogin?: boolean; cliVersion?: string; adapterVersion?: string; latestCliVersion?: string; updateAvailable?: boolean }[]; checking?: boolean }
   /** Grok's grok.com + user-level MCP inventory (`_x.ai/mcp/list`; project-file
    *  servers omitted). The desk keeps launch recipes and `configFile`; remotes
    *  receive `projectMcpServerForRemote` (page fields only — no `tag`).
@@ -499,10 +499,10 @@ export type HostMsg =
   | { type: "updateAvailable"; version: string; url: string }
   /** Desktop in-app update is downloaded and waiting for restart. Host-local. */
   | { type: "updateReady"; version: string }
-  | { type: "initialized"; info: { cliPath: string; cwd: string; version: string | null; provider?: "grok" | "codex" | "claude"; init: { protocolVersion?: unknown } } }
+  | { type: "initialized"; info: { cliPath: string; cwd: string; version: string | null; provider?: "grok" | "codex" | "claude" | "gemini"; init: { protocolVersion?: unknown } } }
   | { type: "cliUpdating" }
   // `worktree` gates the gear's Apply/Remove worktree items to worktree sessions.
-  | { type: "session"; sessionId: string; models: ModelInfo[]; currentModelId: string | undefined; worktree?: boolean; provider?: "grok" | "codex" | "claude" }
+  | { type: "session"; sessionId: string; models: ModelInfo[]; currentModelId: string | undefined; worktree?: boolean; provider?: "grok" | "codex" | "claude" | "gemini" }
   // The focused conversation's display name, using the same precedence as a
   // history row. It is separate from `sessions` because VS Code does not keep
   // that browser-only list populated while the history popover is closed.
@@ -681,10 +681,10 @@ export type HostMsg =
   // itself and a terminal is the better affordance, so nothing changes there.
   | {
       type: "onboarding";
-      state: "connect-agent" | "missing-cli" | "auth-required" | "missing-codex" | "codex-login" | "missing-claude" | "claude-login" | "provider-connected" | "no-project";
+      state: "connect-agent" | "missing-cli" | "auth-required" | "missing-codex" | "codex-login" | "missing-claude" | "claude-login" | "missing-gemini" | "gemini-login" | "provider-connected" | "no-project";
       platform?: string;
       reason?: string;
-      provider?: "grok" | "codex" | "claude";
+      provider?: "grok" | "codex" | "claude" | "gemini";
       launched?: boolean;
       device?: {
         /** starting: spawned, nothing printed yet. waiting: URL and code are on
@@ -1049,31 +1049,31 @@ export type WebviewMsg =
   | { type: "exitPlanAnswer"; requestId: number | string; verdict: "approved" | "abandoned" | "rejected"; comment?: string }
   | { type: "questionAnswer"; requestId: number | string; answers?: Record<string, string>; annotations?: Record<string, { notes?: string; preview?: string }> }
   | { type: "questionCancel"; requestId: number | string }
-  | { type: "setModel"; modelId: string; provider?: "grok" | "codex" | "claude" }
+  | { type: "setModel"; modelId: string; provider?: "grok" | "codex" | "claude" | "gemini" }
   | { type: "installCodex" }
   | { type: "cancelCodexInstall" }
   | { type: "runInstallCmd" }
-  | { type: "runGrokLogin"; provider?: "grok" | "codex" | "claude" }
+  | { type: "runGrokLogin"; provider?: "grok" | "codex" | "claude" | "gemini" }
   // Stop a headless sign-in the host is running. Only reachable while one is in
   // flight, and it kills a child process this same user started moments ago.
   // `github` is the clone-form / Settings `gh auth login --web` child, not an
   // agent; an older host that does not know the value no-ops rather than
   // cancelling Grok.
-  | { type: "cancelDeviceLogin"; provider?: "grok" | "codex" | "claude" | "github" }
+  | { type: "cancelDeviceLogin"; provider?: "grok" | "codex" | "claude" | "gemini" | "github" }
   // Paste-code half of a headless sign-in: the person typed the vendor's code
   // into the card and we write it to the CLI's stdin. Additive — an older host
   // simply has no handler, and an older client never posts it.
-  | { type: "submitDeviceLoginCode"; provider?: "grok" | "codex" | "claude"; code: string }
-  | { type: "logout"; provider?: "grok" | "codex" | "claude" }
+  | { type: "submitDeviceLoginCode"; provider?: "grok" | "codex" | "claude" | "gemini"; code: string }
+  | { type: "logout"; provider?: "grok" | "codex" | "claude" | "gemini" }
   | { type: "checkGrokUpdate" }
   | { type: "updateGrok" }
-  | { type: "recheckConnection"; provider?: "grok" | "codex" | "claude" }
+  | { type: "recheckConnection"; provider?: "grok" | "codex" | "claude" | "gemini" }
   /** Re-observe every account without asserting anything about it. Unlike
    *  `recheckConnection` this never marks a provider connected — it re-runs the
    *  CLI locators and re-probes the credentials of accounts already connected,
    *  so Settings → Providers can be made to tell the truth on demand. */
   | { type: "refreshProviders" }
-  | { type: "retryProviderSession"; provider?: "grok" | "codex" | "claude" }
+  | { type: "retryProviderSession"; provider?: "grok" | "codex" | "claude" | "gemini" }
   | { type: "listSessions"; offset?: number; limit?: number; providerCursor?: { grokOffset: number; codexHighWater?: { updatedAt: number; id: string } }; query?: string }
   // Preview rows for a repo the client is NOT currently in — the projects rail
   // shows a few sessions per repo without switching to it. `cwd` is matched

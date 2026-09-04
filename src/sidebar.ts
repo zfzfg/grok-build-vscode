@@ -24,6 +24,9 @@ import { warmCodexModelCache } from "./codex-model-cache";
 import { CLAUDE_ACP_ADAPTER_VERSION, ClaudeBackend, isClaudeCredentialError } from "./claude-backend";
 import { locateClaudeCli, parseClaudeVersionOutput } from "./claude-cli-locator";
 import { warmClaudeModelCache } from "./claude-model-cache";
+import { GeminiBackend, isGeminiCredentialError } from "./gemini-backend";
+import { locateGeminiCli, parseGeminiVersionOutput } from "./gemini-cli-locator";
+import { warmGeminiModelCache } from "./gemini-model-cache";
 import {
   adapterEntriesEligibleForClear,
   adapterListEntry,
@@ -746,6 +749,9 @@ export class GrokSidebar {
   private claudeSessionCache = new Map<string, SessionListEntry[]>();
   private claudeSessionCacheAt = new Map<string, number>();
   private claudeSessionRefresh = new Map<string, Promise<void>>();
+  private geminiSessionCache = new Map<string, SessionListEntry[]>();
+  private geminiSessionCacheAt = new Map<string, number>();
+  private geminiSessionRefresh = new Map<string, Promise<void>>();
   private codexInstallAbort?: AbortController;
   private providerConnectionState: ProviderConnections = {};
   /**
@@ -897,6 +903,7 @@ export class GrokSidebar {
   private cliPath?: string;
   private codexCliPath?: string;
   private claudeCliPath?: string;
+  private geminiCliPath?: string;
   private readonly providerCliVersions: Partial<Record<AcpProvider, string>> = {};
   /** Accounts that are configured but answered an auth-shaped failure. Not the
    *  same as disconnected: the CLI is installed and the user meant to use it,
@@ -906,7 +913,7 @@ export class GrokSidebar {
    *  never rediscovers CLIs on the first-send path. Null until the first
    *  refresh so an unsnapshotted send OMITS the flags instead of reporting a
    *  constructor default as a measurement. */
-  private lastProviderConnected: { grok: boolean; codex: boolean; claude: boolean } | null = null;
+  private lastProviderConnected: { grok: boolean; codex: boolean; claude: boolean; gemini: boolean } | null = null;
   /** Last `postVoiceConfigured` result per normalized cwd. Same send-path
    *  rule: a cwd with no entry is unknown and the field is omitted, never
    *  coerced to false. Rebuilt on each refresh so removed keys cannot serve
@@ -1043,6 +1050,7 @@ export class GrokSidebar {
   private grokVersionProbe?: Promise<string>;
   private codexVersionProbe?: Promise<string>;
   private claudeVersionProbe?: Promise<string>;
+  private geminiVersionProbe?: Promise<string>;
   /** History browsing scope. Deliberately independent of the live session cwd. */
   private selectedRepoCwd?: string;
   /**
@@ -1538,11 +1546,19 @@ export class GrokSidebar {
       this.codexCliPath = located;
       return located;
     }
-    if (this.claudeCliPath && fs.existsSync(this.claudeCliPath)) return this.claudeCliPath;
-    const located = locateClaudeCli({
-      configuredPath: this.host.getConfiguration("grok").get<string>("claudeCliPath", ""),
+    if (provider === "claude") {
+      if (this.claudeCliPath && fs.existsSync(this.claudeCliPath)) return this.claudeCliPath;
+      const located = locateClaudeCli({
+        configuredPath: this.host.getConfiguration("grok").get<string>("claudeCliPath", ""),
+      });
+      this.claudeCliPath = located;
+      return located;
+    }
+    if (this.geminiCliPath && fs.existsSync(this.geminiCliPath)) return this.geminiCliPath;
+    const located = locateGeminiCli({
+      configuredPath: this.host.getConfiguration("grok").get<string>("geminiCliPath", ""),
     });
-    this.claudeCliPath = located;
+    this.geminiCliPath = located;
     return located;
   }
 
@@ -1551,6 +1567,7 @@ export class GrokSidebar {
       grok: !!this.locateProvider("grok"),
       codex: !!this.locateProvider("codex"),
       claude: !!this.locateProvider("claude"),
+      gemini: !!this.locateProvider("gemini"),
     };
   }
 
@@ -1565,16 +1582,24 @@ export class GrokSidebar {
     if (provider === "claude") {
       return { cache: this.claudeSessionCache, at: this.claudeSessionCacheAt, refresh: this.claudeSessionRefresh };
     }
+    if (provider === "gemini") {
+      return { cache: this.geminiSessionCache, at: this.geminiSessionCacheAt, refresh: this.geminiSessionRefresh };
+    }
     return undefined;
   }
 
   private allAdapterCatalogs(): Iterable<readonly SessionListEntry[]> {
-    return [...this.codexSessionCache.values(), ...this.claudeSessionCache.values()];
+    return [
+      ...(this.codexSessionCache?.values() ?? []),
+      ...(this.claudeSessionCache?.values() ?? []),
+      ...(this.geminiSessionCache?.values() ?? []),
+    ];
   }
 
-  private createProviderBackend(provider: AcpProvider): CodexBackend | ClaudeBackend | undefined {
+  private createProviderBackend(provider: AcpProvider): CodexBackend | ClaudeBackend | GeminiBackend | undefined {
     if (provider === "codex") return new CodexBackend();
     if (provider === "claude") return new ClaudeBackend();
+    if (provider === "gemini") return new GeminiBackend();
     return undefined;
   }
 
@@ -1610,7 +1635,7 @@ export class GrokSidebar {
    * something available the session's own provider is the specific gap to
    * close, so show that.
    */
-  private onboardingForSession(session: Session): "connect-agent" | "auth-required" | "codex-login" | "claude-login" {
+  private onboardingForSession(session: Session): "connect-agent" | "auth-required" | "codex-login" | "claude-login" | "gemini-login" {
     if (session.hasHistory) return providerLoginState(session.provider);
     return this.usableProviders().length ? providerLoginState(session.provider) : "connect-agent";
   }
@@ -1630,6 +1655,7 @@ export class GrokSidebar {
       grok: usedBefore && !!this.locateProvider("grok"),
       codex: false,
       claude: false,
+      gemini: false,
     };
     void this.state.update(PROVIDER_CONNECTIONS_KEY, migrated);
     return migrated;
@@ -1750,11 +1776,35 @@ export class GrokSidebar {
     }
   }
 
+  private async warmConnectedGeminiModels(): Promise<boolean> {
+    const cliPath = this.locateProvider("gemini");
+    if (!cliPath) return false;
+    try {
+      await warmGeminiModelCache({
+        cliPath,
+        onModels: (models, currentModelId) => this.cacheProviderModels("gemini", models, currentModelId),
+        log: (message) => this.host.appendLine(message),
+        fallbackCwd: this.workspaceRoot() || undefined,
+      });
+      this.setProviderNeedsLogin("gemini", false);
+      return true;
+    } catch (error) {
+      this.host.appendLine(`[gemini] model-cache warm-up failed: ${(error as Error).message}`);
+      if (isGeminiCredentialError(error)) {
+        this.setProviderNeedsLogin("gemini", true);
+      } else {
+        this.setProviderNeedsLogin("gemini", false);
+      }
+      return false;
+    }
+  }
+
   /** Explicit credential observation. Unlike history refresh this never obeys
    * the listing freshness clock, so a completed sign-in is visible at once. */
   private async reprobeProviderCredentials(provider: AcpProvider): Promise<boolean> {
     if (provider === "codex") return this.warmConnectedCodexModels();
     if (provider === "claude") return this.warmConnectedClaudeModels();
+    if (provider === "gemini") return this.warmConnectedGeminiModels();
     const cliPath = this.locateProvider("grok");
     if (!cliPath) return false;
     // session/new is what actually proves the account, but grok has no ACP
@@ -2151,6 +2201,10 @@ export class GrokSidebar {
       // rest of this host, so hardcoding made the fallback miss a credential
       // that was plainly there and tell the user to sign in again (review).
       if (provider === "grok") return fs.existsSync(path.join(resolveGrokHome(process.env), "auth.json"));
+      if (provider === "gemini") {
+        const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
+        return fs.existsSync(path.join(home, ".gemini", "oauth.json")) || fs.existsSync(path.join(home, ".gemini", "settings.json"));
+      }
       return false;
     } catch {
       return false;
@@ -2230,7 +2284,8 @@ export class GrokSidebar {
     const grokConnected = connected.grok === true && located.grok === true;
     const codexConnected = connected.codex === true && located.codex === true;
     const claudeConnected = connected.claude === true && located.claude === true;
-    this.lastProviderConnected = { grok: grokConnected, codex: codexConnected, claude: claudeConnected };
+    const geminiConnected = connected.gemini === true && located.gemini === true;
+    this.lastProviderConnected = { grok: grokConnected, codex: codexConnected, claude: claudeConnected, gemini: geminiConnected };
     return {
       type: "providerState",
       providers: [
@@ -2257,6 +2312,12 @@ export class GrokSidebar {
           ...(claudeConnected && needsLogin.claude ? { needsLogin: true } : {}),
           ...(claudeConnected && versions.claude ? { cliVersion: versions.claude } : {}),
           ...(claudeConnected ? { adapterVersion: CLAUDE_ACP_ADAPTER_VERSION } : {}),
+        },
+        {
+          id: "gemini",
+          connected: geminiConnected,
+          ...(geminiConnected && needsLogin.gemini ? { needsLogin: true } : {}),
+          ...(geminiConnected && versions.gemini ? { cliVersion: versions.gemini } : {}),
         },
       ],
       ...(this.providerRefreshInFlight ? { checking: true } : {}),
@@ -2315,6 +2376,7 @@ export class GrokSidebar {
       if (!this.testForceMissingGrokCli) this.cliPath = undefined;
       this.codexCliPath = undefined;
       this.claudeCliPath = undefined;
+      this.geminiCliPath = undefined;
       // Read AFTER dropping the paths, so a CLI that appeared since boot counts.
       const located = this.locatedProviders();
       const installed = ACP_PROVIDERS.filter((provider) => located[provider]);
@@ -2514,7 +2576,7 @@ export class GrokSidebar {
   private providerForRequestedModel(modelId: string, fallback: AcpProvider): AcpProvider {
     if (!modelId) return fallback;
     const cache = this.state.get<ProviderModelCache>(PROVIDER_MODEL_CACHE_KEY, {});
-    const matches = (["grok", "codex", "claude"] as const).filter((provider) =>
+    const matches = (["grok", "codex", "claude", "gemini"] as const).filter((provider) =>
       cache[provider]?.models.some((model) => model.modelId === modelId));
     return matches.length === 1 ? matches[0] : fallback;
   }
@@ -2581,6 +2643,10 @@ export class GrokSidebar {
       }
       if (e.affectsConfiguration("grok.claudeCliPath")) {
         this.claudeCliPath = undefined;
+        this.postProviderState();
+      }
+      if (e.affectsConfiguration("grok.geminiCliPath")) {
+        this.geminiCliPath = undefined;
         this.postProviderState();
       }
       if (e.affectsConfiguration("grok.expandCommandOutputs")) {
@@ -3189,7 +3255,7 @@ Only continue if you trust this code.`,
           if (session.provider === "codex") {
             await session.client.setMode("default");
             await session.client.setMode("agent-full-access");
-          } else if (session.provider === "claude") {
+          } else if (session.provider === "claude" || session.provider === "gemini") {
             await session.client.setMode("yolo");
           } else {
             await session.client.setMode(ACT_MODE_ID);
@@ -3223,7 +3289,7 @@ Only continue if you trust this code.`,
         if (session.provider === "codex") {
           await session.client.setMode("default");
           await session.client.setMode("agent");
-        } else if (session.provider === "claude") {
+        } else if (session.provider === "claude" || session.provider === "gemini") {
           await session.client.setMode("agent");
         } else {
           await session.client.setMode(ACT_MODE_ID);
@@ -3610,7 +3676,7 @@ Only continue if you trust this code.`,
       ...overrides,
       [sid]: { ...(overrides[sid] ?? {}), activeAt },
     });
-    for (const provider of (["codex", "claude"] as const)) {
+    for (const provider of (["codex", "claude", "gemini"] as const)) {
       const history = this.adapterHistory(provider);
       if (!history) continue;
       for (const [key, entries] of history.cache) {
@@ -7656,6 +7722,7 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
       if (adapterIds.size) {
         this.scheduleAdapterHistoryRefresh("codex", cwd);
         this.scheduleAdapterHistoryRefresh("claude", cwd);
+        this.scheduleAdapterHistoryRefresh("gemini", cwd);
       }
       for (const id of adapterIds) {
         const cached = findCachedAdapterSession(
@@ -7931,7 +7998,7 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
         );
         if (choice !== "Sign Out") return;
       }
-      const logoutArgs = provider === "claude" ? ["auth", "logout"] : ["logout"];
+      const logoutArgs = (provider === "claude" || provider === "gemini") ? ["auth", "logout"] : ["logout"];
       try {
         await execGrokCli(cliPath, logoutArgs, { timeout: 30_000, windowsHide: true });
       } catch (error) {
@@ -8418,6 +8485,7 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
   private probeProviderVersion(provider: AcpProvider): Promise<string> {
     if (provider === "codex") return this.probeCodexVersion();
     if (provider === "claude") return this.probeClaudeVersion();
+    if (provider === "gemini") return this.probeGeminiVersion();
     if (this.grokVersionProbe) return this.grokVersionProbe;
     this.grokVersionProbe = (async () => {
       const cliPath = this.locateProvider("grok");
@@ -8479,6 +8547,31 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
       }
     })();
     return this.claudeVersionProbe;
+  }
+
+  /** Read `gemini --version` once per activation. */
+  private probeGeminiVersion(): Promise<string> {
+    if (this.geminiVersionProbe) return this.geminiVersionProbe;
+    this.geminiVersionProbe = (async () => {
+      const cliPath = this.locateProvider("gemini");
+      if (!cliPath) return "";
+      try {
+        const { stdout } = await execGrokCli(cliPath, ["--version"], {
+          timeout: 30_000,
+          windowsHide: true,
+        });
+        const version = parseGeminiVersionOutput(stdout ?? "");
+        if (!version) throw new Error("unrecognized version output");
+        this.providerCliVersions.gemini = version;
+        this.postProviderState();
+        return version;
+      } catch (error) {
+        this.host.appendLine(`gemini --version failed: ${(error as Error).message}`);
+        this.postProviderState();
+        return "";
+      }
+    })();
+    return this.geminiVersionProbe;
   }
 
   /** Once per extension upgrade, from session start, with a fresh install only
@@ -9967,6 +10060,18 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
         clock.record("load", 0);
         clock.record("replay(post)", 0);
         session.activeSessionId = client.sessionId;
+        if (session.autoApprove) {
+          try {
+            if (session.provider === "codex") {
+              await client.setMode("default");
+              await client.setMode("agent-full-access");
+            } else if (session.provider === "claude" || session.provider === "gemini") {
+              await client.setMode("yolo");
+            } else {
+              await client.setMode(ACT_MODE_ID);
+            }
+          } catch { /* best-effort */ }
+        }
       }
       if (gen !== session.gen) { client.dispose(); session.client = undefined; return undefined; }
       this.host.appendLine(clock.summary(session.historyEventCount));
@@ -11026,9 +11131,8 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
           await this.startDeviceLogin(provider, cliPath, clientId);
           break;
         }
-        // Official CLI owns login. For Claude this is `claude auth login`
-        // without --claudeai — we never implement or proxy Claude.ai OAuth.
-        const loginArgs = provider === "claude" ? ["auth", "login"] : ["login"];
+        // Official CLI owns login. For Claude and Gemini this is `auth login`.
+        const loginArgs = (provider === "claude" || provider === "gemini") ? ["auth", "login"] : ["login"];
         const term = this.host.createTerminal({
           name: `${providerDisplayName(provider)} Login`,
           shellPath: cliPath,
@@ -12192,7 +12296,11 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
       : this.refreshAdapterHistory(provider, cwd, key))
       .catch((error) => {
         this.host.appendLine(`[${provider}] session listing failed: ${(error as Error).message}`);
-        const credential = provider === "claude" ? isClaudeCredentialError(error) : isCodexCredentialError(error);
+        const credential = provider === "claude"
+          ? isClaudeCredentialError(error)
+          : provider === "gemini"
+          ? isGeminiCredentialError(error)
+          : isCodexCredentialError(error);
         if (!credential) return;
         history.at.set(key, Date.now());
         this.setProviderNeedsLogin(provider, true);
@@ -13564,6 +13672,7 @@ ${many ? `${working.length} conversations are` : "A conversation is"} still work
           grokConnected: this.lastProviderConnected?.grok,
           codexConnected: this.lastProviderConnected?.codex,
           claudeConnected: this.lastProviderConnected?.claude,
+          geminiConnected: this.lastProviderConnected?.gemini,
           provider: session.provider,
           connectorCount: Object.keys(this.connectedConnectorStore()).length,
           worktree: !!session.worktree,

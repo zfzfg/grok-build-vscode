@@ -278,6 +278,11 @@
           "default": "",
           "description": "Path to the Anthropic Claude Code CLI (`claude`). Empty = auto-discover on PATH, then well-known user-bin locations. Authentication stays in Anthropic's own CLI."
         },
+        "grok.geminiCliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Google Antigravity or Gemini CLI (`agy` / `gemini`). Empty = auto-discover on PATH, then well-known user-bin locations. Authentication stays in Google's own CLI."
+        },
         "grok.defaultModel": {
           "type": "string",
           "default": "",

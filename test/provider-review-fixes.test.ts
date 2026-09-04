@@ -251,6 +251,7 @@ describe("multi-provider review regressions", () => {
         { id: "grok", connected: true },
         { id: "codex", connected: false },
         { id: "claude", connected: false },
+        { id: "gemini", connected: false },
       ],
     });
 
